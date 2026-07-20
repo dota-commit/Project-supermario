@@ -31,22 +31,86 @@ resource "aws_iam_role_policy_attachment" "example-AmazonEKSClusterPolicy" {
   role       = aws_iam_role.example.name
 }
 
-# -------------------------
+# ------------------------------
 # Networking Setup
-# -------------------------
+# ------------------------------
 
-# Get default VPC
-data "aws_vpc" "default" {
-  default = true
-}
+# Create a new VPC
+resource "aws_vpc" "eks_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
 
-# Get public subnets from the default VPC
-data "aws_subnets" "public" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+  tags = {
+    Name = "eks-vpc"
   }
 }
+
+# Create a interney gateway for the public subnet
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.eks_vpc.id
+
+  tags = {
+    Name = "eks-igw"
+  }
+}
+
+#Create two subnets
+resource "aws_subnet" "public1" {
+  vpc_id                  = aws_vpc.eks_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone      = "eu-north-1a"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "Public-Subnet-1"
+
+    "kubernetes.io/cluster/EKS_CLOUD" = "shared"
+    "kubernetes.io/role/elb"          = "1"  
+  }
+} 
+
+#Second subnet
+resource "aws_subnet" "public2" {
+  vpc_id                  = aws_vpc.eks_vpc.id
+  cidr_block              = "10.0.2.0/24"
+  availability_zone      = "eu-north-1b"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "Public-Subnet-2"
+
+    "kubernetes.io/cluster/EKS_CLOUD" = "shared"
+    "kubernetes.io/role/elb"          = "1"
+  }
+}
+
+#Create a route table 
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.eks_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+
+  tags = {
+    Name = "Public-RT"
+  }
+}
+
+#Associate the route table
+resource "aws_route_table_association" "public1" {
+  subnet_id      = aws_subnet.public1.id
+  route_table_id = aws_route_table.public.id
+}
+
+#Associate the route table again 
+resource "aws_route_table_association" "public2" {
+  subnet_id      = aws_subnet.public2.id
+  route_table_id = aws_route_table.public.id
+}
+
 
 # -------------------------
 # EKS Cluster Setup
@@ -58,7 +122,13 @@ resource "aws_eks_cluster" "example" {
 
   # Attach cluster to VPC subnets
   vpc_config {
-    subnet_ids = data.aws_subnets.public.ids
+    subnet_ids = [
+      aws_subnet.public1.id,
+      aws_subnet.public2.id,
+    ]
+
+    endpoint_public_access  = true
+    endpoint_private_access = true
   }
 
   # Ensure IAM Role permissions are created before the cluster
@@ -115,7 +185,10 @@ resource "aws_eks_node_group" "example" {
   cluster_name    = aws_eks_cluster.example.name
   node_group_name = "Node-cloud"
   node_role_arn   = aws_iam_role.example1.arn
-  subnet_ids      = data.aws_subnets.public.ids
+  subnet_ids      = [
+    aws_subnet.public1.id,
+    aws_subnet.public2.id,
+  ]
 
   # Auto-scaling configuration for node group
   scaling_config {
